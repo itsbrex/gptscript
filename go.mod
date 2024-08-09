@@ -1,6 +1,7 @@
 module github.com/gptscript-ai/gptscript
 
-go 1.22.3
+// This can't be upgraded until the issue with sys.daemon on Windows is resolved
+go 1.22.4
 
 require (
 	github.com/AlecAivazis/survey/v2 v2.3.7
@@ -15,8 +16,9 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gptscript-ai/broadcaster v0.0.0-20240625175512-c43682019b86
 	github.com/gptscript-ai/chat-completion-client v0.0.0-20240531200700-af8e7ecf0379
-	github.com/gptscript-ai/cmd v0.0.0-20240625175447-4250b42feb7d
-	github.com/gptscript-ai/tui v0.0.0-20240627044440-d416df63c10d
+	github.com/gptscript-ai/cmd v0.0.0-20240802230653-326b7baf6fcb
+	github.com/gptscript-ai/go-gptscript v0.9.4-0.20240801203434-840b14393b17
+	github.com/gptscript-ai/tui v0.0.0-20240804004233-efc5673dc76e
 	github.com/hexops/autogold/v2 v2.2.1
 	github.com/hexops/valast v1.4.4
 	github.com/jaytaylor/html2text v0.0.0-20230321000545-74c2419ad056
@@ -28,9 +30,10 @@ require (
 	github.com/spf13/pflag v1.0.5
 	github.com/stretchr/testify v1.8.4
 	github.com/tidwall/gjson v1.17.1
+	github.com/xeipuuv/gojsonschema v1.2.0
 	golang.org/x/exp v0.0.0-20240103183307-be819d1f06fc
 	golang.org/x/sync v0.7.0
-	golang.org/x/term v0.20.0
+	golang.org/x/term v0.22.0
 	gopkg.in/yaml.v3 v3.0.1
 	gotest.tools/v3 v3.5.1
 	sigs.k8s.io/yaml v1.4.0
@@ -62,7 +65,6 @@ require (
 	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/gookit/color v1.5.4 // indirect
 	github.com/gorilla/css v1.0.0 // indirect
-	github.com/gptscript-ai/go-gptscript v0.0.0-20240625134437-4b83849794cc // indirect
 	github.com/hashicorp/errwrap v1.0.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/hexops/autogold v1.3.1 // indirect
@@ -100,14 +102,16 @@ require (
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
 	github.com/ulikunitz/xz v0.5.10 // indirect
+	github.com/xeipuuv/gojsonpointer v0.0.0-20180127040702-4e3ac2762d5f // indirect
+	github.com/xeipuuv/gojsonreference v0.0.0-20180127040603-bd5ef7bd5415 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yuin/goldmark v1.5.4 // indirect
 	github.com/yuin/goldmark-emoji v1.0.2 // indirect
 	go4.org v0.0.0-20200411211856-f5505b9728dd // indirect
-	golang.org/x/mod v0.17.0 // indirect
-	golang.org/x/net v0.24.0 // indirect
-	golang.org/x/sys v0.20.0 // indirect
-	golang.org/x/text v0.15.0 // indirect
-	golang.org/x/tools v0.20.0 // indirect
+	golang.org/x/mod v0.19.0 // indirect
+	golang.org/x/net v0.27.0 // indirect
+	golang.org/x/sys v0.22.0 // indirect
+	golang.org/x/text v0.16.0 // indirect
+	golang.org/x/tools v0.23.0 // indirect
 	mvdan.cc/gofumpt v0.6.0 // indirect
 )

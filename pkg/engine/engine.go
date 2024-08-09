@@ -45,8 +45,9 @@ type Return struct {
 }
 
 type Call struct {
-	ToolID string `json:"toolID,omitempty"`
-	Input  string `json:"input,omitempty"`
+	Missing bool   `json:"missing,omitempty"`
+	ToolID  string `json:"toolID,omitempty"`
+	Input   string `json:"input,omitempty"`
 }
 
 type CallResult struct {
@@ -207,14 +208,16 @@ func NewContext(ctx context.Context, prg *types.Program, input string) (Context,
 	}
 
 	callCtx.AgentGroup = agentGroup
+
+	if callCtx.Tool.IsAgentsOnly() && len(callCtx.AgentGroup) > 0 {
+		callCtx.Tool = callCtx.Program.ToolSet[callCtx.AgentGroup[0].ToolID]
+	}
+
 	return callCtx, nil
 }
 
 func (c *Context) SubCallContext(ctx context.Context, input, toolID, callID string, toolCategory ToolCategory) (Context, error) {
-	tool, ok := c.Program.ToolSet[toolID]
-	if !ok {
-		return Context{}, fmt.Errorf("failed to file tool for id [%s]", toolID)
-	}
+	tool := c.Program.ToolSet[toolID]
 
 	if callID == "" {
 		callID = counter.Next()
@@ -382,19 +385,25 @@ func (e *Engine) complete(ctx context.Context, state *State) (*Return, error) {
 	state.Pending = map[string]types.CompletionToolCall{}
 	for _, content := range resp.Content {
 		if content.ToolCall != nil {
-			var toolID string
+			var (
+				toolID  string
+				missing bool
+			)
 			for _, tool := range state.Completion.Tools {
-				if tool.Function.Name == content.ToolCall.Function.Name {
+				if strings.EqualFold(tool.Function.Name, content.ToolCall.Function.Name) {
 					toolID = tool.Function.ToolID
 				}
 			}
 			if toolID == "" {
-				return nil, fmt.Errorf("failed to find tool id for tool %s in tool_call result", content.ToolCall.Function.Name)
+				log.Debugf("failed to find tool id for tool %s in tool_call result", content.ToolCall.Function.Name)
+				toolID = types.ToolNormalizer(content.ToolCall.Function.Name)
+				missing = true
 			}
 			state.Pending[content.ToolCall.ID] = *content.ToolCall
 			ret.Calls[content.ToolCall.ID] = Call{
-				ToolID: toolID,
-				Input:  content.ToolCall.Function.Arguments,
+				ToolID:  toolID,
+				Missing: missing,
+				Input:   content.ToolCall.Function.Arguments,
 			}
 		} else {
 			cp := content.Text

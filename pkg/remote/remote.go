@@ -22,34 +22,45 @@ import (
 )
 
 type Client struct {
-	clientsLock sync.Mutex
-	cache       *cache.Client
-	clients     map[string]*openai.Client
-	models      map[string]*openai.Client
-	runner      *runner.Runner
-	envs        []string
-	credStore   credentials.CredentialStore
+	modelsLock      sync.Mutex
+	cache           *cache.Client
+	modelToProvider map[string]string
+	runner          *runner.Runner
+	envs            []string
+	credStore       credentials.CredentialStore
+	defaultProvider string
 }
 
-func New(r *runner.Runner, envs []string, cache *cache.Client, credStore credentials.CredentialStore) *Client {
+func New(r *runner.Runner, envs []string, cache *cache.Client, credStore credentials.CredentialStore, defaultProvider string) *Client {
 	return &Client{
-		cache:     cache,
-		runner:    r,
-		envs:      envs,
-		credStore: credStore,
+		cache:           cache,
+		runner:          r,
+		envs:            envs,
+		credStore:       credStore,
+		defaultProvider: defaultProvider,
 	}
 }
 
 func (c *Client) Call(ctx context.Context, messageRequest types.CompletionRequest, status chan<- types.CompletionStatus) (*types.CompletionMessage, error) {
-	c.clientsLock.Lock()
-	client, ok := c.models[messageRequest.Model]
-	c.clientsLock.Unlock()
+	c.modelsLock.Lock()
+	provider, ok := c.modelToProvider[messageRequest.Model]
+	c.modelsLock.Unlock()
 
 	if !ok {
 		return nil, fmt.Errorf("failed to find remote model %s", messageRequest.Model)
 	}
 
-	_, modelName := types.SplitToolRef(messageRequest.Model)
+	client, err := c.load(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+
+	toolName, modelName := types.SplitToolRef(messageRequest.Model)
+	if modelName == "" {
+		// modelName is empty, then the messageRequest.Model is not of the form 'modelName from provider'
+		// Therefore, the modelName is the toolName
+		modelName = toolName
+	}
 	messageRequest.Model = modelName
 	return client.Call(ctx, messageRequest, status)
 }
@@ -73,25 +84,35 @@ func (c *Client) ListModels(ctx context.Context, providers ...string) (result []
 	return
 }
 
-func (c *Client) Supports(ctx context.Context, modelName string) (bool, error) {
-	toolName, modelNameSuffix := types.SplitToolRef(modelName)
-	if modelNameSuffix == "" {
+func (c *Client) parseModel(modelString string) (modelName, providerName string) {
+	toolName, subTool := types.SplitToolRef(modelString)
+	if subTool == "" {
+		// This is just a plain model string "gpt4o"
+		return toolName, c.defaultProvider
+	}
+	// This is a provider string "modelName from provider"
+	return subTool, toolName
+}
+
+func (c *Client) Supports(ctx context.Context, modelString string) (bool, error) {
+	_, providerName := c.parseModel(modelString)
+	if providerName == "" {
 		return false, nil
 	}
 
-	client, err := c.load(ctx, toolName)
+	_, err := c.load(ctx, providerName)
 	if err != nil {
 		return false, err
 	}
 
-	c.clientsLock.Lock()
-	defer c.clientsLock.Unlock()
+	c.modelsLock.Lock()
+	defer c.modelsLock.Unlock()
 
-	if c.models == nil {
-		c.models = map[string]*openai.Client{}
+	if c.modelToProvider == nil {
+		c.modelToProvider = map[string]string{}
 	}
 
-	c.models[modelName] = client
+	c.modelToProvider[modelString] = providerName
 	return true, nil
 }
 
@@ -124,24 +145,11 @@ func (c *Client) clientFromURL(ctx context.Context, apiURL string) (*openai.Clie
 }
 
 func (c *Client) load(ctx context.Context, toolName string) (*openai.Client, error) {
-	c.clientsLock.Lock()
-	defer c.clientsLock.Unlock()
-
-	client, ok := c.clients[toolName]
-	if ok {
-		return client, nil
-	}
-
-	if c.clients == nil {
-		c.clients = make(map[string]*openai.Client)
-	}
-
 	if isHTTPURL(toolName) {
 		remoteClient, err := c.clientFromURL(ctx, toolName)
 		if err != nil {
 			return nil, err
 		}
-		c.clients[toolName] = remoteClient
 		return remoteClient, nil
 	}
 
@@ -157,14 +165,8 @@ func (c *Client) load(ctx context.Context, toolName string) (*openai.Client, err
 		return nil, err
 	}
 
-	if strings.HasSuffix(url, "/") {
-		url += "v1"
-	} else {
-		url += "/v1"
-	}
-
-	client, err = openai.NewClient(ctx, c.credStore, openai.Options{
-		BaseURL:  url,
+	client, err := openai.NewClient(ctx, c.credStore, openai.Options{
+		BaseURL:  strings.TrimSuffix(url, "/") + "/v1",
 		Cache:    c.cache,
 		CacheKey: prg.EntryToolID,
 	})
@@ -172,7 +174,6 @@ func (c *Client) load(ctx context.Context, toolName string) (*openai.Client, err
 		return nil, err
 	}
 
-	c.clients[toolName] = client
 	return client, nil
 }
 

@@ -52,15 +52,18 @@ type toolOrFileRequest struct {
 	cacheOptions  `json:",inline"`
 	openAIOptions `json:",inline"`
 
-	ToolDefs           toolDefs `json:"toolDefs,inline"`
-	SubTool            string   `json:"subTool"`
-	Input              string   `json:"input"`
-	ChatState          string   `json:"chatState"`
-	Workspace          string   `json:"workspace"`
-	Env                []string `json:"env"`
-	CredentialContext  string   `json:"credentialContext"`
-	CredentialOverride string   `json:"credentialOverride"`
-	Confirm            bool     `json:"confirm"`
+	ToolDefs             toolDefs `json:"toolDefs,inline"`
+	SubTool              string   `json:"subTool"`
+	Input                string   `json:"input"`
+	ChatState            string   `json:"chatState"`
+	Workspace            string   `json:"workspace"`
+	Env                  []string `json:"env"`
+	CredentialContext    string   `json:"credentialContext"`
+	CredentialOverrides  []string `json:"credentialOverrides"`
+	Confirm              bool     `json:"confirm"`
+	Location             string   `json:"location,omitempty"`
+	ForceSequential      bool     `json:"forceSequential"`
+	DefaultModelProvider string   `json:"DefaultModelProvider,omitempty"`
 }
 
 type content struct {
@@ -83,7 +86,8 @@ type parseRequest struct {
 	parser.Options `json:",inline"`
 	content        `json:",inline"`
 
-	File string `json:"file"`
+	DisableCache bool   `json:"disableCache"`
+	File         string `json:"file"`
 }
 
 type modelsRequest struct {

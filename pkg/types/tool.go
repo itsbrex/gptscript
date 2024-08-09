@@ -26,6 +26,20 @@ var (
 	DefaultFiles = []string{"agent.gpt", "tool.gpt"}
 )
 
+type ToolType string
+
+const (
+	ToolTypeContext    = ToolType("context")
+	ToolTypeAgent      = ToolType("agent")
+	ToolTypeOutput     = ToolType("output")
+	ToolTypeInput      = ToolType("input")
+	ToolTypeAssistant  = ToolType("assistant")
+	ToolTypeTool       = ToolType("tool")
+	ToolTypeCredential = ToolType("credential")
+	ToolTypeProvider   = ToolType("provider")
+	ToolTypeDefault    = ToolType("")
+)
+
 type ErrToolNotFound struct {
 	ToolName string
 }
@@ -77,28 +91,6 @@ type ToolReference struct {
 	ToolID    string `json:"toolID,omitempty"`
 }
 
-func (p Program) GetContextToolRefs(toolID string) ([]ToolReference, error) {
-	return p.ToolSet[toolID].GetContextTools(p)
-}
-
-func (p Program) GetCompletionTools() (result []CompletionTool, err error) {
-	return Tool{
-		ToolDef: ToolDef{
-			Parameters: Parameters{
-				Tools: []string{"main"},
-			},
-		},
-		ToolMapping: map[string][]ToolReference{
-			"main": {
-				{
-					Reference: "main",
-					ToolID:    p.EntryToolID,
-				},
-			},
-		},
-	}.GetCompletionTools(p)
-}
-
 func (p Program) TopLevelTools() (result []Tool) {
 	for _, tool := range p.ToolSet[p.EntryToolID].LocalTools {
 		if target, ok := p.ToolSet[tool]; ok {
@@ -139,11 +131,13 @@ type Parameters struct {
 	Export              []string         `json:"export,omitempty"`
 	Agents              []string         `json:"agents,omitempty"`
 	Credentials         []string         `json:"credentials,omitempty"`
+	ExportCredentials   []string         `json:"exportCredentials,omitempty"`
 	InputFilters        []string         `json:"inputFilters,omitempty"`
 	ExportInputFilters  []string         `json:"exportInputFilters,omitempty"`
 	OutputFilters       []string         `json:"outputFilters,omitempty"`
 	ExportOutputFilters []string         `json:"exportOutputFilters,omitempty"`
 	Blocking            bool             `json:"-"`
+	Type                ToolType         `json:"type,omitempty"`
 }
 
 func (p Parameters) ToolRefNames() []string {
@@ -154,6 +148,7 @@ func (p Parameters) ToolRefNames() []string {
 		p.ExportContext,
 		p.Context,
 		p.Credentials,
+		p.ExportCredentials,
 		p.InputFilters,
 		p.ExportInputFilters,
 		p.OutputFilters,
@@ -162,8 +157,9 @@ func (p Parameters) ToolRefNames() []string {
 
 type ToolDef struct {
 	Parameters   `json:",inline"`
-	Instructions string      `json:"instructions,omitempty"`
-	BuiltinFunc  BuiltinFunc `json:"-"`
+	Instructions string            `json:"instructions,omitempty"`
+	BuiltinFunc  BuiltinFunc       `json:"-"`
+	MetaData     map[string]string `json:"metaData,omitempty"`
 }
 
 type Tool struct {
@@ -345,6 +341,13 @@ func (t Tool) GetAgents(prg Program) (result []ToolReference, _ error) {
 		return nil, err
 	}
 
+	genericToolRefs, err := t.getCompletionToolRefs(prg, nil, ToolTypeAgent)
+	if err != nil {
+		return nil, err
+	}
+
+	toolRefs = append(toolRefs, genericToolRefs...)
+
 	// Agent Tool refs must be named
 	for i, toolRef := range toolRefs {
 		if toolRef.Named != "" {
@@ -356,7 +359,9 @@ func (t Tool) GetAgents(prg Program) (result []ToolReference, _ error) {
 			name = toolRef.Reference
 		}
 		normed := ToolNormalizer(name)
-		normed = strings.TrimSuffix(strings.TrimSuffix(normed, "Agent"), "Assistant")
+		if trimmed := strings.TrimSuffix(strings.TrimSuffix(normed, "Agent"), "Assistant"); trimmed != "" {
+			normed = trimmed
+		}
 		toolRefs[i].Named = normed
 	}
 
@@ -401,6 +406,9 @@ func (t ToolDef) String() string {
 	}
 	if t.Parameters.Description != "" {
 		_, _ = fmt.Fprintf(buf, "Description: %s\n", t.Parameters.Description)
+	}
+	if t.Parameters.Type != ToolTypeDefault {
+		_, _ = fmt.Fprintf(buf, "Type: %s\n", strings.ToUpper(string(t.Type[0]))+string(t.Type[1:]))
 	}
 	if len(t.Parameters.Agents) != 0 {
 		_, _ = fmt.Fprintf(buf, "Agents: %s\n", strings.Join(t.Parameters.Agents, ", "))
@@ -466,6 +474,11 @@ func (t ToolDef) String() string {
 			_, _ = fmt.Fprintf(buf, "Credential: %s\n", cred)
 		}
 	}
+	if len(t.Parameters.ExportCredentials) > 0 {
+		for _, exportCred := range t.Parameters.ExportCredentials {
+			_, _ = fmt.Fprintf(buf, "Share Credential: %s\n", exportCred)
+		}
+	}
 	if t.Parameters.Chat {
 		_, _ = fmt.Fprintf(buf, "Chat: true\n")
 	}
@@ -476,10 +489,25 @@ func (t ToolDef) String() string {
 		_, _ = fmt.Fprintln(buf, t.Instructions)
 	}
 
+	if t.Name != "" {
+		keys := maps.Keys(t.MetaData)
+		sort.Strings(keys)
+		for _, key := range keys {
+			buf.WriteString("---\n")
+			buf.WriteString("!metadata:")
+			buf.WriteString(t.Name)
+			buf.WriteString(":")
+			buf.WriteString(key)
+			buf.WriteString("\n")
+			buf.WriteString(t.MetaData[key])
+			buf.WriteString("\n")
+		}
+	}
+
 	return buf.String()
 }
 
-func (t Tool) GetExportedContext(prg Program) ([]ToolReference, error) {
+func (t Tool) getExportedContext(prg Program) ([]ToolReference, error) {
 	result := &toolRefSet{}
 
 	exportRefs, err := t.GetToolRefsFromNames(t.ExportContext)
@@ -491,13 +519,13 @@ func (t Tool) GetExportedContext(prg Program) ([]ToolReference, error) {
 		result.Add(exportRef)
 
 		tool := prg.ToolSet[exportRef.ToolID]
-		result.AddAll(tool.GetExportedContext(prg))
+		result.AddAll(tool.getExportedContext(prg))
 	}
 
 	return result.List()
 }
 
-func (t Tool) GetExportedTools(prg Program) ([]ToolReference, error) {
+func (t Tool) getExportedTools(prg Program) ([]ToolReference, error) {
 	result := &toolRefSet{}
 
 	exportRefs, err := t.GetToolRefsFromNames(t.Export)
@@ -507,7 +535,7 @@ func (t Tool) GetExportedTools(prg Program) ([]ToolReference, error) {
 
 	for _, exportRef := range exportRefs {
 		result.Add(exportRef)
-		result.AddAll(prg.ToolSet[exportRef.ToolID].GetExportedTools(prg))
+		result.AddAll(prg.ToolSet[exportRef.ToolID].getExportedTools(prg))
 	}
 
 	return result.List()
@@ -517,6 +545,15 @@ func (t Tool) GetExportedTools(prg Program) ([]ToolReference, error) {
 // contexts that are exported by the context tools. This will recurse all exports.
 func (t Tool) GetContextTools(prg Program) ([]ToolReference, error) {
 	result := &toolRefSet{}
+	result.AddAll(t.getDirectContextToolRefs(prg))
+	result.AddAll(t.getCompletionToolRefs(prg, nil, ToolTypeContext))
+	return result.List()
+}
+
+// GetContextTools returns all tools that are in the context of the tool including all the
+// contexts that are exported by the context tools. This will recurse all exports.
+func (t Tool) getDirectContextToolRefs(prg Program) ([]ToolReference, error) {
+	result := &toolRefSet{}
 
 	contextRefs, err := t.GetToolRefsFromNames(t.Context)
 	if err != nil {
@@ -524,7 +561,7 @@ func (t Tool) GetContextTools(prg Program) ([]ToolReference, error) {
 	}
 
 	for _, contextRef := range contextRefs {
-		result.AddAll(prg.ToolSet[contextRef.ToolID].GetExportedContext(prg))
+		result.AddAll(prg.ToolSet[contextRef.ToolID].getExportedContext(prg))
 		result.Add(contextRef)
 	}
 
@@ -543,7 +580,9 @@ func (t Tool) GetOutputFilterTools(program Program) ([]ToolReference, error) {
 		result.Add(outputFilterRef)
 	}
 
-	contextRefs, err := t.GetContextTools(program)
+	result.AddAll(t.getCompletionToolRefs(program, nil, ToolTypeOutput))
+
+	contextRefs, err := t.getDirectContextToolRefs(program)
 	if err != nil {
 		return nil, err
 	}
@@ -568,7 +607,9 @@ func (t Tool) GetInputFilterTools(program Program) ([]ToolReference, error) {
 		result.Add(inputFilterRef)
 	}
 
-	contextRefs, err := t.GetContextTools(program)
+	result.AddAll(t.getCompletionToolRefs(program, nil, ToolTypeInput))
+
+	contextRefs, err := t.getDirectContextToolRefs(program)
 	if err != nil {
 		return nil, err
 	}
@@ -595,11 +636,28 @@ func (t Tool) GetNextAgentGroup(prg Program, agentGroup []ToolReference, toolID 
 	return agentGroup, nil
 }
 
+func filterRefs(prg Program, refs []ToolReference, types ...ToolType) (result []ToolReference) {
+	for _, ref := range refs {
+		if slices.Contains(types, prg.ToolSet[ref.ToolID].Type) {
+			result = append(result, ref)
+		}
+	}
+	return
+}
+
 func (t Tool) GetCompletionTools(prg Program, agentGroup ...ToolReference) (result []CompletionTool, err error) {
-	refs, err := t.getCompletionToolRefs(prg, agentGroup)
+	toolSet := &toolRefSet{}
+	toolSet.AddAll(t.getCompletionToolRefs(prg, agentGroup, ToolTypeDefault, ToolTypeTool))
+
+	if err := t.addAgents(prg, toolSet); err != nil {
+		return nil, err
+	}
+
+	refs, err := toolSet.List()
 	if err != nil {
 		return nil, err
 	}
+
 	return toolRefsToCompletionTools(refs, prg), nil
 }
 
@@ -631,32 +689,38 @@ func (t Tool) addReferencedTools(prg Program, result *toolRefSet) error {
 		result.Add(subToolRef)
 
 		// Get all tools exports
-		result.AddAll(prg.ToolSet[subToolRef.ToolID].GetExportedTools(prg))
+		result.AddAll(prg.ToolSet[subToolRef.ToolID].getExportedTools(prg))
 	}
 
 	return nil
 }
 
 func (t Tool) addContextExportedTools(prg Program, result *toolRefSet) error {
-	contextTools, err := t.GetContextTools(prg)
+	contextTools, err := t.getDirectContextToolRefs(prg)
 	if err != nil {
 		return err
 	}
 
 	for _, contextTool := range contextTools {
-		result.AddAll(prg.ToolSet[contextTool.ToolID].GetExportedTools(prg))
+		result.AddAll(prg.ToolSet[contextTool.ToolID].getExportedTools(prg))
 	}
 
 	return nil
 }
 
-func (t Tool) getCompletionToolRefs(prg Program, agentGroup []ToolReference) ([]ToolReference, error) {
+func (t Tool) getCompletionToolRefs(prg Program, agentGroup []ToolReference, types ...ToolType) ([]ToolReference, error) {
+	if len(types) == 0 {
+		types = []ToolType{ToolTypeDefault, ToolTypeTool}
+	}
+
 	result := toolRefSet{}
 
-	for _, agent := range agentGroup {
-		// don't add yourself
-		if agent.ToolID != t.ID {
-			result.Add(agent)
+	if t.Chat {
+		for _, agent := range agentGroup {
+			// don't add yourself
+			if agent.ToolID != t.ID {
+				result.Add(agent)
+			}
 		}
 	}
 
@@ -668,8 +732,24 @@ func (t Tool) getCompletionToolRefs(prg Program, agentGroup []ToolReference) ([]
 		return nil, err
 	}
 
-	if err := t.addAgents(prg, &result); err != nil {
+	refs, err := result.List()
+	return filterRefs(prg, refs, types...), err
+}
+
+func (t Tool) GetCredentialTools(prg Program, agentGroup []ToolReference) ([]ToolReference, error) {
+	result := toolRefSet{}
+
+	result.AddAll(t.GetToolRefsFromNames(t.Credentials))
+
+	result.AddAll(t.getCompletionToolRefs(prg, nil, ToolTypeCredential))
+
+	toolRefs, err := t.getCompletionToolRefs(prg, agentGroup)
+	if err != nil {
 		return nil, err
+	}
+	for _, toolRef := range toolRefs {
+		referencedTool := prg.ToolSet[toolRef.ToolID]
+		result.AddAll(referencedTool.GetToolRefsFromNames(referencedTool.ExportCredentials))
 	}
 
 	return result.List()
@@ -729,6 +809,10 @@ type ToolSource struct {
 	Repo     *Repo  `json:"repo,omitempty"`
 }
 
+func (t ToolSource) IsGit() bool {
+	return t.Repo != nil && t.Repo.VCS == "git"
+}
+
 func (t ToolSource) String() string {
 	return fmt.Sprintf("%s:%d", t.Location, t.LineNo)
 }
@@ -761,6 +845,10 @@ func (t Tool) IsDaemon() bool {
 
 func (t Tool) IsOpenAPI() bool {
 	return strings.HasPrefix(t.Instructions, OpenAPIPrefix)
+}
+
+func (t Tool) IsAgentsOnly() bool {
+	return t.IsNoop() && len(t.Context) == 0
 }
 
 func (t Tool) IsEcho() bool {

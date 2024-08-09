@@ -12,13 +12,6 @@ jobs:
   release-tag:
     runs-on: ubuntu-22.04
     steps:
-      - name: trigger ui repo tag workflow
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.DISPATCH_PAT }}
-          repository: gptscript-ai/ui
-          event-type: release
-          client-payload: '{"tag": "${{ github.ref_name }}"}'
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -27,16 +20,18 @@ jobs:
         uses: actions/setup-go@v5
         with:
           cache: false
-          go-version: "1.22"
+          # This can't be upgraded until the issue with sys.daemon on Windows is resolved
+          # After the issue is resolved, this can be set to 1.22
+          go-version: "1.22.4"
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v4
+        uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
-          version: v1.23.0
+          version: "~> v2"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_PROJECT_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
   winget-release:
     needs: release-tag

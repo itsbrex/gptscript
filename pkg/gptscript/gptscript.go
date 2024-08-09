@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/gptscript-ai/gptscript/pkg/builtin"
 	"github.com/gptscript-ai/gptscript/pkg/cache"
@@ -38,18 +40,19 @@ type GPTScript struct {
 }
 
 type Options struct {
-	Cache               cache.Options
-	OpenAI              openai.Options
-	Monitor             monitor.Options
-	Runner              runner.Options
-	CredentialContext   string
-	Quiet               *bool
-	Workspace           string
-	DisablePromptServer bool
-	Env                 []string
+	Cache                cache.Options
+	OpenAI               openai.Options
+	Monitor              monitor.Options
+	Runner               runner.Options
+	DefaultModelProvider string
+	CredentialContext    string
+	Quiet                *bool
+	Workspace            string
+	DisablePromptServer  bool
+	Env                  []string
 }
 
-func complete(opts ...Options) Options {
+func Complete(opts ...Options) Options {
 	var result Options
 	for _, opt := range opts {
 		result.Cache = cache.Complete(result.Cache, opt.Cache)
@@ -62,6 +65,7 @@ func complete(opts ...Options) Options {
 		result.Workspace = types.FirstSet(opt.Workspace, result.Workspace)
 		result.Env = append(result.Env, opt.Env...)
 		result.DisablePromptServer = types.FirstSet(opt.DisablePromptServer, result.DisablePromptServer)
+		result.DefaultModelProvider = types.FirstSet(opt.DefaultModelProvider, result.DefaultModelProvider)
 	}
 
 	if result.Quiet == nil {
@@ -78,7 +82,7 @@ func complete(opts ...Options) Options {
 }
 
 func New(ctx context.Context, o ...Options) (*GPTScript, error) {
-	opts := complete(o...)
+	opts := Complete(o...)
 	registry := llm.NewRegistry()
 
 	cacheClient, err := cache.New(opts.Cache)
@@ -104,16 +108,18 @@ func New(ctx context.Context, o ...Options) (*GPTScript, error) {
 		return nil, err
 	}
 
-	oaiClient, err := openai.NewClient(ctx, credStore, opts.OpenAI, openai.Options{
-		Cache:   cacheClient,
-		SetSeed: true,
-	})
-	if err != nil {
-		return nil, err
-	}
+	if opts.DefaultModelProvider == "" {
+		oaiClient, err := openai.NewClient(ctx, credStore, opts.OpenAI, openai.Options{
+			Cache:   cacheClient,
+			SetSeed: true,
+		})
+		if err != nil {
+			return nil, err
+		}
 
-	if err := registry.AddClient(oaiClient); err != nil {
-		return nil, err
+		if err := registry.AddClient(oaiClient); err != nil {
+			return nil, err
+		}
 	}
 
 	if opts.Runner.MonitorFactory == nil {
@@ -141,7 +147,7 @@ func New(ctx context.Context, o ...Options) (*GPTScript, error) {
 
 	fullEnv := append(opts.Env, extraEnv...)
 
-	remoteClient := remote.New(runner, fullEnv, cacheClient, credStore)
+	remoteClient := remote.New(runner, fullEnv, cacheClient, credStore, opts.DefaultModelProvider)
 	if err := registry.AddClient(remoteClient); err != nil {
 		closeServer()
 		return nil, err
@@ -167,7 +173,7 @@ func (g *GPTScript) getEnv(env []string) ([]string, error) {
 		}
 	} else if !filepath.IsAbs(g.WorkspacePath) {
 		var err error
-		g.WorkspacePath, err = filepath.Abs(g.WorkspacePath)
+		g.WorkspacePath, err = makeAbsolute(g.WorkspacePath)
 		if err != nil {
 			return nil, err
 		}
@@ -179,6 +185,18 @@ func (g *GPTScript) getEnv(env []string) ([]string, error) {
 		fmt.Sprintf("GPTSCRIPT_WORKSPACE_DIR=%s", g.WorkspacePath),
 		fmt.Sprintf("GPTSCRIPT_WORKSPACE_ID=%s", hash.ID(g.WorkspacePath)),
 	}), nil
+}
+
+func makeAbsolute(path string) (string, error) {
+	if strings.HasPrefix(path, "~"+string(filepath.Separator)) {
+		usr, err := user.Current()
+		if err != nil {
+			return "", err
+		}
+
+		return filepath.Join(usr.HomeDir, path[2:]), nil
+	}
+	return filepath.Abs(path)
 }
 
 func (g *GPTScript) Chat(ctx context.Context, prevState runner.ChatState, prg types.Program, envs []string, input string) (runner.ChatResponse, error) {

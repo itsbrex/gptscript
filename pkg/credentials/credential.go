@@ -16,6 +16,7 @@ const (
 	CredentialTypeTool          CredentialType = "tool"
 	CredentialTypeModelProvider CredentialType = "modelProvider"
 	ExistingCredential                         = "GPTSCRIPT_EXISTING_CREDENTIAL"
+	CredentialExpiration                       = "GPTSCRIPT_CREDENTIAL_EXPIRATION"
 )
 
 type Credential struct {
@@ -35,6 +36,9 @@ func (c Credential) IsExpired() bool {
 }
 
 func (c Credential) toDockerAuthConfig() (types.AuthConfig, error) {
+	for k, v := range c.Env {
+		c.Env[k] = strings.TrimSpace(v)
+	}
 	cred, err := json.Marshal(c)
 	if err != nil {
 		return types.AuthConfig{}, err

@@ -16,7 +16,7 @@ import (
 var (
 	sepRegex       = regexp.MustCompile(`^\s*---+\s*$`)
 	strictSepRegex = regexp.MustCompile(`^---\n$`)
-	skipRegex      = regexp.MustCompile(`^![-\w]+\s*$`)
+	skipRegex      = regexp.MustCompile(`^![-.:\w]+\s*$`)
 )
 
 func normalize(key string) string {
@@ -101,23 +101,23 @@ func isParam(line string, tool *types.Tool) (_ bool, err error) {
 			return false, err
 		}
 		tool.Parameters.Chat = v
-	case "export", "exporttool", "exports", "exporttools", "sharetool", "sharetools":
+	case "export", "exporttool", "exports", "exporttools", "sharetool", "sharetools", "sharedtool", "sharedtools":
 		tool.Parameters.Export = append(tool.Parameters.Export, csv(value)...)
 	case "tool", "tools":
 		tool.Parameters.Tools = append(tool.Parameters.Tools, csv(value)...)
 	case "inputfilter", "inputfilters":
 		tool.Parameters.InputFilters = append(tool.Parameters.InputFilters, csv(value)...)
-	case "shareinputfilter", "shareinputfilters":
+	case "shareinputfilter", "shareinputfilters", "sharedinputfilter", "sharedinputfilters":
 		tool.Parameters.ExportInputFilters = append(tool.Parameters.ExportInputFilters, csv(value)...)
 	case "outputfilter", "outputfilters":
 		tool.Parameters.OutputFilters = append(tool.Parameters.OutputFilters, csv(value)...)
-	case "shareoutputfilter", "shareoutputfilters":
+	case "shareoutputfilter", "shareoutputfilters", "sharedoutputfilter", "sharedoutputfilters":
 		tool.Parameters.ExportOutputFilters = append(tool.Parameters.ExportOutputFilters, csv(value)...)
 	case "agent", "agents":
 		tool.Parameters.Agents = append(tool.Parameters.Agents, csv(value)...)
 	case "globaltool", "globaltools":
 		tool.Parameters.GlobalTools = append(tool.Parameters.GlobalTools, csv(value)...)
-	case "exportcontext", "exportcontexts", "sharecontext", "sharecontexts":
+	case "exportcontext", "exportcontexts", "sharecontext", "sharecontexts", "sharedcontext", "sharedcontexts":
 		tool.Parameters.ExportContext = append(tool.Parameters.ExportContext, csv(value)...)
 	case "context":
 		tool.Parameters.Context = append(tool.Parameters.Context, csv(value)...)
@@ -148,6 +148,10 @@ func isParam(line string, tool *types.Tool) (_ bool, err error) {
 		}
 	case "credentials", "creds", "credential", "cred":
 		tool.Parameters.Credentials = append(tool.Parameters.Credentials, value)
+	case "sharecredentials", "sharecreds", "sharecredential", "sharecred", "sharedcredentials", "sharedcreds", "sharedcredential", "sharedcred":
+		tool.Parameters.ExportCredentials = append(tool.Parameters.ExportCredentials, value)
+	case "type":
+		tool.Type = types.ToolType(strings.ToLower(value))
 	default:
 		return false, nil
 	}
@@ -199,6 +203,7 @@ func (c *context) finish(tools *[]Node) {
 		len(c.tool.GlobalTools) > 0 ||
 		len(c.tool.ExportInputFilters) > 0 ||
 		len(c.tool.ExportOutputFilters) > 0 ||
+		len(c.tool.Agents) > 0 ||
 		c.tool.Chat {
 		*tools = append(*tools, Node{
 			ToolNode: &ToolNode{
@@ -303,6 +308,8 @@ func Parse(input io.Reader, opts ...Options) (Document, error) {
 		}
 	}
 
+	nodes = assignMetadata(nodes)
+
 	if !opt.AssignGlobals {
 		return Document{
 			Nodes: nodes,
@@ -352,6 +359,42 @@ func Parse(input io.Reader, opts ...Options) (Document, error) {
 	return Document{
 		Nodes: nodes,
 	}, nil
+}
+
+func assignMetadata(nodes []Node) (result []Node) {
+	metadata := map[string]map[string]string{}
+	result = make([]Node, 0, len(nodes))
+	for _, node := range nodes {
+		if node.TextNode != nil {
+			body, ok := strings.CutPrefix(node.TextNode.Text, "!metadata:")
+			if ok {
+				line, rest, ok := strings.Cut(body, "\n")
+				if ok {
+					toolName, metaKey, ok := strings.Cut(strings.TrimSpace(line), ":")
+					if ok {
+						d, ok := metadata[toolName]
+						if !ok {
+							d = map[string]string{}
+							metadata[toolName] = d
+						}
+						d[metaKey] = strings.TrimSpace(rest)
+					}
+				}
+			}
+		}
+	}
+	if len(metadata) == 0 {
+		return nodes
+	}
+
+	for _, node := range nodes {
+		if node.ToolNode != nil {
+			node.ToolNode.Tool.MetaData = metadata[node.ToolNode.Tool.Name]
+		}
+		result = append(result, node)
+	}
+
+	return
 }
 
 func isGPTScriptHashBang(line string) bool {

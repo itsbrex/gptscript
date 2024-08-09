@@ -2,12 +2,15 @@ package engine
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -42,6 +45,25 @@ func (o *outputWriter) Write(p []byte) (n int, err error) {
 		},
 	}
 	return len(p), nil
+}
+
+func compressEnv(envs []string) (result []string) {
+	for _, env := range envs {
+		k, v, ok := strings.Cut(env, "=")
+		if !ok || len(v) < 40_000 {
+			result = append(result, env)
+			continue
+		}
+
+		out := bytes.NewBuffer(nil)
+		b64 := base64.NewEncoder(base64.StdEncoding, out)
+		gz := gzip.NewWriter(b64)
+		_, _ = gz.Write([]byte(v))
+		_ = gz.Close()
+		_ = b64.Close()
+		result = append(result, k+`={"_gz":"`+out.String()+`"}`)
+	}
+	return
 }
 
 func (e *Engine) runCommand(ctx Context, tool types.Tool, input string, toolCategory ToolCategory) (cmdOut string, cmdErr error) {
@@ -95,12 +117,15 @@ func (e *Engine) runCommand(ctx Context, tool types.Tool, input string, toolCate
 	for _, inputContext := range ctx.InputContext {
 		instructions = append(instructions, inputContext.Content)
 	}
-	var extraEnv = []string{
-		strings.TrimSpace(fmt.Sprintf("GPTSCRIPT_CONTEXT=%s", strings.Join(instructions, "\n"))),
-	}
 
+	var extraEnv = []string{
+		strings.TrimSpace("GPTSCRIPT_CONTEXT=" + strings.Join(instructions, "\n")),
+	}
 	cmd, stop, err := e.newCommand(ctx.Ctx, extraEnv, tool, input)
 	if err != nil {
+		if toolCategory == NoCategory {
+			return fmt.Sprintf("ERROR: got (%v) while parsing command", err), nil
+		}
 		return "", err
 	}
 	defer stop()
@@ -113,24 +138,34 @@ func (e *Engine) runCommand(ctx Context, tool types.Tool, input string, toolCate
 		},
 	}
 
-	output := &bytes.Buffer{}
-	all := &bytes.Buffer{}
-	cmd.Stderr = io.MultiWriter(all, os.Stderr)
-	cmd.Stdout = io.MultiWriter(all, output, &outputWriter{
-		id:       id,
-		progress: e.Progress,
-	})
+	var (
+		stdout       = &bytes.Buffer{}
+		stdoutAndErr = &bytes.Buffer{}
+		progressOut  = &outputWriter{
+			id:       id,
+			progress: e.Progress,
+		}
+		result *bytes.Buffer
+	)
+
+	cmd.Stdout = io.MultiWriter(stdout, stdoutAndErr, progressOut)
+	if toolCategory == NoCategory || toolCategory == ContextToolCategory {
+		cmd.Stderr = io.MultiWriter(stdoutAndErr, progressOut)
+		result = stdoutAndErr
+	} else {
+		cmd.Stderr = io.MultiWriter(stdoutAndErr, progressOut, os.Stderr)
+		result = stdout
+	}
 
 	if err := cmd.Run(); err != nil {
 		if toolCategory == NoCategory {
-			return fmt.Sprintf("ERROR: got (%v) while running tool, OUTPUT: %s", err, all), nil
+			return fmt.Sprintf("ERROR: got (%v) while running tool, OUTPUT: %s", err, stdoutAndErr), nil
 		}
-		_, _ = os.Stderr.Write(output.Bytes())
 		log.Errorf("failed to run tool [%s] cmd %v: %v", tool.Parameters.Name, cmd.Args, err)
-		return "", fmt.Errorf("ERROR: %s: %w", all, err)
+		return "", fmt.Errorf("ERROR: %s: %w", result, err)
 	}
 
-	return output.String(), IsChatFinishMessage(output.String())
+	return result.String(), IsChatFinishMessage(result.String())
 }
 
 func (e *Engine) getRuntimeEnv(ctx context.Context, tool types.Tool, cmd, env []string) ([]string, error) {
@@ -172,10 +207,8 @@ var ignoreENV = map[string]struct{}{
 }
 
 func appendEnv(envs []string, k, v string) []string {
-	for _, k := range []string{k, env.ToEnvLike(k)} {
-		if _, ignore := ignoreENV[k]; !ignore {
-			envs = append(envs, k+"="+v)
-		}
+	if _, ignore := ignoreENV[k]; !ignore {
+		envs = append(envs, strings.ToUpper(env.ToEnvLike(k))+"="+v)
 	}
 	return envs
 }
@@ -238,6 +271,16 @@ func (e *Engine) newCommand(ctx context.Context, extraEnv []string, tool types.T
 		})
 	}
 
+	// After we determined the interpreter we again interpret the args by env vars
+	args, err = replaceVariablesForInterpreter(interpreter, envMap)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if runtime.GOOS == "windows" && (args[0] == "/bin/bash" || args[0] == "/bin/sh") {
+		args[0] = path.Base(args[0])
+	}
+
 	if runtime.GOOS == "windows" && (args[0] == "/usr/bin/env" || args[0] == "/bin/env") {
 		args = args[1:]
 	}
@@ -248,7 +291,7 @@ func (e *Engine) newCommand(ctx context.Context, extraEnv []string, tool types.T
 	)
 
 	if strings.TrimSpace(rest) != "" {
-		f, err := os.CreateTemp("", version.ProgramName+requiredFileExtensions[args[0]])
+		f, err := os.CreateTemp(env.Getenv("GPTSCRIPT_TMPDIR", envvars), version.ProgramName+requiredFileExtensions[args[0]])
 		if err != nil {
 			return nil, nil, err
 		}
@@ -277,6 +320,90 @@ func (e *Engine) newCommand(ctx context.Context, extraEnv []string, tool types.T
 	}
 
 	cmd := exec.CommandContext(ctx, env.Lookup(envvars, args[0]), cmdArgs...)
-	cmd.Env = envvars
+	cmd.Env = compressEnv(envvars)
 	return cmd, stop, nil
+}
+
+func replaceVariablesForInterpreter(interpreter string, envMap map[string]string) ([]string, error) {
+	var parts []string
+	for i, part := range splitByQuotes(interpreter) {
+		if i%2 == 0 {
+			part = os.Expand(part, func(s string) string {
+				return envMap[s]
+			})
+			// We protect newly resolved env vars from getting replaced when we do the second Expand
+			// after shlex. Yeah, crazy. I'm guessing this isn't secure, but just trying to avoid a foot gun.
+			part = os.Expand(part, func(s string) string {
+				return "${__" + s + "}"
+			})
+		}
+		parts = append(parts, part)
+	}
+
+	parts, err := shlex.Split(strings.Join(parts, ""))
+	if err != nil {
+		return nil, err
+	}
+
+	for i, part := range parts {
+		parts[i] = os.Expand(part, func(s string) string {
+			if strings.HasPrefix(s, "__") {
+				return "${" + s[2:] + "}"
+			}
+			return envMap[s]
+		})
+	}
+
+	return parts, nil
+}
+
+// splitByQuotes will split a string by parsing matching double quotes (with \ as the escape character).
+// The return value conforms to the following properties
+//  1. s == strings.Join(result, "")
+//  2. Even indexes are strings that were not in quotes.
+//  3. Odd indexes are strings that were quoted.
+//
+// Example: s = `In a "quoted string" quotes can be escaped with \"`
+//
+//	result = [`In a `, `"quoted string"`, ` quotes can be escaped with \"`]
+func splitByQuotes(s string) (result []string) {
+	var (
+		buf               strings.Builder
+		inEscape, inQuote bool
+	)
+
+	for _, c := range s {
+		if inEscape {
+			buf.WriteRune(c)
+			inEscape = false
+			continue
+		}
+
+		switch c {
+		case '"':
+			if inQuote {
+				buf.WriteRune(c)
+			}
+			result = append(result, buf.String())
+			buf.Reset()
+			if !inQuote {
+				buf.WriteRune(c)
+			}
+			inQuote = !inQuote
+		case '\\':
+			inEscape = true
+			buf.WriteRune(c)
+		default:
+			buf.WriteRune(c)
+		}
+	}
+
+	if buf.Len() > 0 {
+		if inQuote {
+			result = append(result, "")
+		}
+		result = append(result, buf.String())
+	}
+
+	return
 }

@@ -1,7 +1,6 @@
 package sdkserver
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/gptscript-ai/broadcaster"
 	"github.com/gptscript-ai/gptscript/pkg/cache"
@@ -25,8 +23,6 @@ import (
 	"github.com/gptscript-ai/gptscript/pkg/types"
 	"github.com/gptscript-ai/gptscript/pkg/version"
 )
-
-const toolRunTimeout = 15 * time.Minute
 
 type server struct {
 	gptscriptOpts  gptscript.Options
@@ -158,8 +154,6 @@ func (s *server) execHandler(w http.ResponseWriter, r *http.Request) {
 
 	ctx := gserver.ContextWithNewRunID(r.Context())
 	runID := gserver.RunIDFromContext(ctx)
-	ctx, cancel := context.WithTimeout(ctx, toolRunTimeout)
-	defer cancel()
 
 	// Ensure chat state is not empty.
 	if reqObject.ChatState == "" {
@@ -183,7 +177,7 @@ func (s *server) execHandler(w http.ResponseWriter, r *http.Request) {
 	logger.Debugf("executing tool: %+v", reqObject)
 	var (
 		def           fmt.Stringer = &reqObject.ToolDefs
-		programLoader loaderFunc   = loader.ProgramFromSource
+		programLoader              = loaderWithLocation(loader.ProgramFromSource, reqObject.Location)
 	)
 	if reqObject.Content != "" {
 		def = &reqObject.content
@@ -200,9 +194,11 @@ func (s *server) execHandler(w http.ResponseWriter, r *http.Request) {
 		CredentialContext: reqObject.CredentialContext,
 		Runner: runner.Options{
 			// Set the monitor factory so that we can get events from the server.
-			MonitorFactory:     NewSessionFactory(s.events),
-			CredentialOverride: reqObject.CredentialOverride,
+			MonitorFactory:      NewSessionFactory(s.events),
+			CredentialOverrides: reqObject.CredentialOverrides,
+			Sequential:          reqObject.ForceSequential,
 		},
+		DefaultModelProvider: reqObject.DefaultModelProvider,
 	}
 
 	if reqObject.Confirm {
@@ -231,7 +227,7 @@ func (s *server) parse(w http.ResponseWriter, r *http.Request) {
 	if reqObject.Content != "" {
 		out, err = parser.Parse(strings.NewReader(reqObject.Content), reqObject.Options)
 	} else {
-		content, loadErr := input.FromLocation(reqObject.File)
+		content, loadErr := input.FromLocation(reqObject.File, reqObject.DisableCache)
 		if loadErr != nil {
 			logger.Errorf(loadErr.Error())
 			writeError(logger, w, http.StatusInternalServerError, loadErr)

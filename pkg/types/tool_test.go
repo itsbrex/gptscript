@@ -33,6 +33,15 @@ func TestToolDef_String(t *testing.T) {
 			ExportInputFilters:  []string{"SharedFilter1", "SharedFilter2"},
 			OutputFilters:       []string{"Filter1", "Filter2"},
 			ExportOutputFilters: []string{"SharedFilter1", "SharedFilter2"},
+			ExportCredentials:   []string{"ExportCredential1", "ExportCredential2"},
+			Type:                ToolTypeContext,
+		},
+		MetaData: map[string]string{
+			"package.json": `{
+// blah blah some ugly JSON
+}
+`,
+			"requirements.txt": `requests=5`,
 		},
 		Instructions: "This is a sample instruction",
 	}
@@ -41,6 +50,7 @@ func TestToolDef_String(t *testing.T) {
 Global Tools: GlobalTool1, GlobalTool2
 Name: Tool Sample
 Description: This is a sample tool
+Type: Context
 Agents: Agent1, Agent2
 Tools: Tool1, Tool2
 Share Tools: Export1, Export2
@@ -60,9 +70,20 @@ Parameter: arg2: desc2
 Internal Prompt: true
 Credential: Credential1
 Credential: Credential2
+Share Credential: ExportCredential1
+Share Credential: ExportCredential2
 Chat: true
 
 This is a sample instruction
+---
+!metadata:Tool Sample:package.json
+{
+// blah blah some ugly JSON
+}
+
+---
+!metadata:Tool Sample:requirements.txt
+requests=5
 `).Equal(t, tool.String())
 }
 
